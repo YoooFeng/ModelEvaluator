@@ -25,6 +25,7 @@ import java.sql.DriverManager;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
+import java.util.Random;
 
 public class WekaClassifier extends Applet{
 
@@ -44,7 +45,7 @@ public class WekaClassifier extends Applet{
     public static Instances getInstanceFromDatabase(String projectName, String language, boolean exclude) throws Exception{
         InstanceQuery query = new InstanceQuery();
 
-        query.setDatabaseURL("jdbc:mysql://localhost:3306/travistorrent_calculated");
+        query.setDatabaseURL("jdbc:mysql://localhost:3306/travistorrent");
 
         // 为查询配置数据库帐号和密码
         query.setUsername("root");
@@ -396,43 +397,10 @@ public class WekaClassifier extends Applet{
 
         for(String projectName : projectNames) {
 
-//            if(projectName.equals("makrio/makrio")
-//                    || projectName.equals("reficio/p2-maven-plugin")
-//                    || projectName.equals("kevinsawicki/http-request")
-//                    || projectName.equals("foursquare/fongo")
-//                    || projectName.equals("zmoazeni/csscss")
-//                    || projectName.equals("RailsApps/rails_apps_composer")
-//                    || projectName.equals("Esri/geometry-api-java")
-//                    || projectName.equals("june29/horesase-boys")
-//                    || projectName.equals("julianhyde/linq4j")
-//                    || projectName.equals("collectiveidea/interactor")
-//                    || projectName.equals("airlift/slice")
-//                    || projectName.equals("sdywcd/jshoper3x")
-//                    || projectName.equals("bitsofproof/supernode")
-//                    || projectName.equals("JakeWharton/timber")
-//                    || projectName.equals("chocoteam/choco3")
-//                    || projectName.equals("bemyeyes/bemyeyes-server")
-//                    || projectName.equals("eval/envied")
-//                    || projectName.equals("MirakelX/mirakel-android")
-//                    || projectName.equals("OfficeDev/ews-java-api")
-//                    || projectName.equals("palantir/eclipse-typescript")
-//                    || projectName.equals("javaee-samples/javaee7-samples")
-//                    || projectName.equals("OpenSOC/opensoc-streaming")
-//                    || projectName.equals("xerial/sqlite-jdbc")
-//                    || projectName.equals("JavaMoney/jsr354-api")
-//                    || projectName.equals("JuanitoFatas/fast-ruby")
-//                    || projectName.equals("boxen/puppet-osx")
-//                    || projectName.equals("inf0rmer/blanket")
-//                    || projectName.equals("fazibear/colorize")
-//            ) continue;
-
-
-
             Instances predictData = getInstanceFromDatabase(projectName,"",false);
 
             predictData.deleteAttributeAt(0);
             predictData.setClassIndex(predictData.numAttributes() - 1);
-
 
             // 初始化的时候也需要数据，以获得数据类型的信息
             Evaluation evaluation = new Evaluation(predictData);
@@ -470,10 +438,6 @@ public class WekaClassifier extends Applet{
         query.setUsername("root");
         query.setPassword("123456");
 
-//        query.setQuery("select "
-//                + "distinct(project_name) "
-//                + "from travistorrent_calculated_09_01 "
-//                + "");
         query.setQuery("select table1.project_name from" +
                 "(select project_name, count(distinct(status)) as num" +
                 " from travistorrent_calculated_09_01" +
@@ -485,6 +449,100 @@ public class WekaClassifier extends Applet{
         str = str.replace("}","");
         String[] projectNames = str.split(",");
         return projectNames;
+    }
+
+    // 为指定数据集中的数据赋予权值
+    public static void evaluateWeightedModel(String projectName, String language, double weight) throws Exception{
+
+        System.out.println("=============================== weight " + weight + " ======================================");
+        PW.println("=============================== weight " + weight + " ======================================");
+
+        // 除去项目之外相似项目的记录数据
+        Instances allIns = getInstanceFromDatabase(projectName, language, true);
+
+        // 得到项目本身的构建记录数据
+        Instances projectIns = getInstanceFromDatabase(projectName, "", false);
+
+        // 为项目本身的数据设定权重
+        for(Instance in : projectIns) {
+            in.setWeight(weight);
+        }
+
+        // 合并训练集
+        allIns.addAll(projectIns);
+        allIns.deleteAttributeAt(0);
+        allIns.setClassIndex(allIns.numAttributes() - 1);
+
+        // 训练模型
+        Classifier m_Randomforest = trainModel(allIns);
+
+        // 把模型存下来
+        saveModel(m_Randomforest, "RF-" + projectName + "-weight-" + Double.toString(weight), MODEL_STORAGE_DIR);
+
+        // 直接读取模型
+//        Classifier m_Randomforest = loadModel("RF-jruby-weight-" + Double.toString(weight), MODEL_STORAGE_DIR);
+
+        // 对原数据集进行评估
+        Instances testIns = getInstanceFromDatabase(projectName, "", false);
+        testIns.deleteAttributeAt(0);
+        testIns.setClassIndex(testIns.numAttributes() - 1);
+
+        Evaluation evaluation = new Evaluation(testIns);
+
+        evaluation.evaluateModel(m_Randomforest, testIns);
+
+        System.out.println(evaluation.weightedPrecision());
+        PW.println(evaluation.weightedPrecision());
+
+        System.out.println(evaluation.toSummaryString());
+        PW.println(evaluation.toSummaryString());
+
+        System.out.println(evaluation.toClassDetailsString());
+        PW.println(evaluation.toClassDetailsString());
+
+    }
+
+    // 手动对指定数据集进行十折交叉验证。应用于模型较大，数据较多的情况。
+    public static void tenFoldValidation() throws Exception{
+        // 将数据分为十等分 存入数组中，循环训练并验证
+
+        // 获取所有数据
+        Instances allIns = getInstanceFromDatabase("", "", false);
+        allIns.deleteAttributeAt(0);
+        allIns.setClassIndex(allIns.numAttributes() - 1);
+        System.out.println("Count of Instances: " + allIns.size());
+
+        // 重新采样打乱顺序
+        Random rand = new Random(5);
+        Instances randData = new Instances(allIns);
+        randData.randomize(rand);
+
+        // 十折交叉验证，数据分为五个部分
+        randData.stratify(10);
+
+        for(int n = 0; n < 10; n++){
+            Instances train = randData.trainCV(10, n);
+            Instances test = randData.testCV(10, n);
+
+            Classifier m_Randomforest = trainModel(train);
+
+            Evaluation evaluation = new Evaluation(test);
+
+            evaluation.evaluateModel(m_Randomforest, test);
+
+            System.out.println("========================= Number "+ n + " ===================================");
+            PW.println("========================= Number "+ n + " ===================================");
+
+            System.out.println(evaluation.weightedPrecision());
+            PW.println(evaluation.weightedPrecision());
+
+            System.out.println(evaluation.toSummaryString());
+            PW.println(evaluation.toSummaryString());
+
+            System.out.println(evaluation.toClassDetailsString());
+            PW.println(evaluation.toClassDetailsString());
+
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -514,26 +572,14 @@ public class WekaClassifier extends Applet{
 //            predicting(project, lan);
 //        }
 
-        Classifier tree = loadModel("RF-all_projects", MODEL_STORAGE_DIR);
-        String[] projectNames = getAllProjectName();
+//        Classifier tree = loadModel("RF-all_projects", MODEL_STORAGE_DIR);
+//        String[] projectNames = getAllProjectName();
+//
+//        predictingAll(tree, projectNames);
+//        evaluateWeightedModel("opf/openproject", "ruby", 0.5D);
 
-//        projectNames = Arrays.copyOfRange(projectNames, 1213, projectNames.length);
-//        int i = 0;
-//
-//        while(i <= projectNames.length) {
-//            String[] sub = Arrays.copyOfRange(projectNames, i, i + 100);
-//
-//            predictingAll(tree, sub);
-//
-//            if(i == projectNames.length - 100) break;
-//
-//            if(i + 100 < projectNames.length) i += 100;
-//            else i = projectNames.length - 100;
-//
-//            System.out.println("i" + i);
-//        }
 
-        predictingAll(tree, projectNames);
+        tenFoldValidation();
 
         PW.close();
 
